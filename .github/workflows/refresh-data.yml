@@ -1,0 +1,58 @@
+# 每周自动刷新内置快照（Bitstamp 日线 + 区块高度锚点），有变化就提交到 main。
+# 用 GITHUB_TOKEN 推送的提交不会触发 GitHub Pages 的自动构建（GitHub 的
+# 防递归规则），所以提交后再显式请求一次 Pages 构建。
+name: Refresh data snapshots
+
+on:
+  schedule:
+    - cron: '23 3 * * 1' # 每周一 03:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch daily candles (Bitstamp)
+        run: node scripts/fetch-history.mjs
+
+      - name: Fetch height anchors (incremental, mempool.space + blockstream.info)
+        run: node scripts/fetch-heights.mjs
+
+      - name: Commit and push
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/btc-daily.json data/btc-heights.json
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No snapshot changes."
+            exit 0
+          fi
+          git commit -m "数据快照自动刷新 $(date -u +%Y/%m/%d)"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Pages 以 main 分支为源时，GITHUB_TOKEN 的推送不会自动触发部署，
+      # 这里请求一次构建。若此步失败（权限不足），快照会在下一次人工推送时上线
+      - name: Request GitHub Pages build
+        if: steps.commit.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${GITHUB_REPOSITORY}/pages/builds"

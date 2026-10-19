@@ -2,9 +2,10 @@
 // 用于「日期 ↔ 区块高度」插值映射——每根日 K 的边界都是真实链上时间，
 // 插值误差小于日期的日级显示粒度。
 // 数据源：mempool.space 与 blockstream.info 轮询（Esplora 同款接口，
-// 每次调用返回自该高度起往下 10~15 个区块头）。约 6,700 次请求，
+// 每次调用返回自该高度起往下 10~15 个区块头）。全量约 6,700 次请求，
 // 并发 6、失败指数退避重试、断点续传（进度存 CKPT，成功后清除）。
-// 用法：node scripts/fetch-heights.mjs   （可选 CKPT=/path/to/ckpt.json）
+// 默认增量：复用已有 data/btc-heights.json 的锚点，只补抓新块（每周约 7 个）。
+// 用法：node scripts/fetch-heights.mjs   （可选 CKPT=/path/to/ckpt.json，FULL=1 全量重抓）
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -16,6 +17,7 @@ const HOSTS = [
   'https://blockstream.info/api/blocks/',
 ];
 const CKPT = process.env.CKPT ?? join(tmpdir(), 'wolfy-heights-ckpt.json');
+const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'btc-heights.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 链上最新高度：锚点铺到最后一个完整的 144 块桶
@@ -27,6 +29,13 @@ for (let h = 0; h <= tip; h += STEP) targets.push(h);
 
 // 断点续传：已抓到的 {height: timestamp}
 const done = existsSync(CKPT) ? JSON.parse(readFileSync(CKPT, 'utf8')) : {};
+// 增量模式（默认）：复用已有快照的锚点——真实区块头时间戳不会变——只补抓
+// 其后的新锚点；最末两个锚点仍重抓，规避上次抓取时靠近链顶的重组风险。
+// FULL=1 强制全量重抓
+if (!process.env.FULL && existsSync(OUT)) {
+  const prev = JSON.parse(readFileSync(OUT, 'utf8')).anchors;
+  for (const [ts, h] of prev.slice(0, -2)) done[h] ??= ts;
+}
 const todo = targets.filter((h) => done[h] === undefined);
 console.log(`目标 ${targets.length} 个锚点（高度 0 → ${targets.at(-1)}），待抓 ${todo.length}`);
 
@@ -73,7 +82,6 @@ for (let i = 1; i < anchors.length; i++) {
 }
 
 const out = { generated: new Date().toISOString(), source: 'mempool.space + blockstream.info', anchors };
-const path = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'btc-heights.json');
-writeFileSync(path, JSON.stringify(out));
+writeFileSync(OUT, JSON.stringify(out));
 unlinkSync(CKPT);
-console.log(`OK: ${anchors.length} 个锚点（高度 ${anchors[0][1]} → ${anchors.at(-1)[1]}）已写入 ${path}`);
+console.log(`OK: ${anchors.length} 个锚点（高度 ${anchors[0][1]} → ${anchors.at(-1)[1]}，本次新抓 ${todo.length}）已写入 ${OUT}`);
