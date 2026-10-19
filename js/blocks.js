@@ -41,19 +41,24 @@ export async function loadHeightAnchors() {
   _liveAnchor = false;
 }
 
-// 页面加载与轮询时维护一个「现在」锚点，让最近的映射精确到当前链上
-// 高度。原地更新而非逐块追加：相邻单块锚点会把泊松噪声灌进外推斜率
-export async function fetchTipAnchor() {
+// 链上最新高度：HTTP 单次请求（轮询兜底用；推送链路见 main.js connectHeightStream）
+export async function fetchTipHeight() {
   const res = await fetch('https://mempool.space/api/blocks/tip/height', { signal: timeoutSignal(8000) });
   if (!res.ok) throw new Error(`mempool.space HTTP ${res.status}`);
   const tip = Number(await res.text());
+  if (!Number.isFinite(tip)) throw new Error('mempool.space 返回的高度不是数字');
+  return tip;
+}
+
+// 每拿到一个新高度（轮询或推送）就维护一个「现在」锚点，让最近的映射精确到
+// 当前链上高度。原地更新而非逐块追加：相邻单块锚点会把泊松噪声灌进外推斜率
+export function setTipAnchor(tip) {
   const nowSec = Math.floor(Date.now() / 1000);
   if (_liveAnchor) { _anchors.pop(); _liveAnchor = false; }
   if (Number.isFinite(tip) && tip > _anchors.at(-1)[1] && nowSec > _anchors.at(-1)[0]) {
     _anchors.push([nowSec, tip]);
     _liveAnchor = true;
   }
-  return tip;
 }
 
 // 未来外推的基线跨度：≥ 4,320 块（≈ 30 天）。相邻锚点间隔太短时，

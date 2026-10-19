@@ -265,6 +265,12 @@ html:not([lang="en"]) .glyph-en { display: none; }
   50% { opacity: 0.25; }
 }
 
+/* 链路中断：指示灯熄灭（中性灰、停止脉动）；高度读数同时加「≈」标明为推算值 */
+.live-dot.off {
+  background: var(--faint);
+  animation: none;
+}
+
 .stat-value {
   display: flex;
   align-items: baseline;

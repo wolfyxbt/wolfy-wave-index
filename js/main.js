@@ -11,7 +11,7 @@ import {
   mergeCandles, fillGaps,
 } from './data.js';
 import {
-  loadHeightAnchors, fetchTipAnchor, heightAt, timeAtHeight,
+  loadHeightAnchors, fetchTipHeight, setTipAnchor, heightAt, timeAtHeight,
   aggregateByBlocks, extendBlocks, prependBlocks, waveIndexAt, waveHorizonHeight,
 } from './blocks.js';
 import { computePivots, buildAnnotations } from './pivots.js';
@@ -59,9 +59,15 @@ function waveTextColor(v) {
   return `rgb(${Math.round(r * k)}, ${Math.round(g * k)}, ${Math.round(b * k)})`;
 }
 
-function showNotice(text) {
+// 提示条带 key：同一时刻只显示一条；hideNotice(key) 只收起对应来源的提示，
+// 链路恢复时不会误收其他来源的提示
+function showNotice(text, key = '') {
   $('notice-text').textContent = text;
+  $('notice').dataset.key = key;
   $('notice').hidden = false;
+}
+function hideNotice(key) {
+  if ($('notice').dataset.key === key) $('notice').hidden = true;
 }
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
 
@@ -112,8 +118,26 @@ async function init() {
   let pivots = [];
   let meta = null;         // { topPos, todayPos, predictedEnd }（单位：高度）
   let idxCache = null;
-  let tipHeight = null;    // 当前链上高度（后台获取 + 轮询）
-  let livePrice = null;    // 实时价格（轮询 Bitstamp ticker，仅供顶栏）
+  let tipHeight = null;    // 当前链上高度（mempool.space WebSocket 推送 + HTTP 轮询兜底）
+  let livePrice = null;    // 实时价格（Bitstamp WebSocket + ticker 轮询兜底）
+  // 链路健康：记「最近一次证明链路在线」的时刻（ms）。高度 = HTTP 取到高度
+  // 或收到任一 mempool WS 消息（含 pong）；价格 = 收到成交/盘口或 ticker 成功。
+  // 指示灯与「≈」标记只看这两个时刻，不看多久没出新块——出块间隔超过
+  // 半小时很常见，那不是断线
+  const link = {
+    heightAt: 0,
+    priceAt: 0,
+    heightStale: true,    // 首屏即为推算值，拿到真实数据才点亮
+    priceStale: true,
+    heightTried: false,   // 首次高度请求是否已有结果（页面刚打开不弹提示）
+    heightNoticed: false, // 当前这轮中断是否已弹过提示
+  };
+  const HEIGHT_STALE_MS = 150000; // 轮询 60s × 2 + 余量；WS 在线时每 30s 有 pong
+  const PRICE_STALE_MS = 90000;   // WS 盘口每秒有消息；ticker 轮询 30s × 2 + 余量
+  // 价格 WebSocket 连接状态（声明在前：checkLinks 在价格流启动前就会跑）
+  let wsAlive = false;
+  let priceSock = null;
+  let priceReconnectTimer = null;
   let watermark = null;
   let waveNow = null;      // 当前（今日）狼波指数值，十字线移开时回落显示
 
@@ -394,7 +418,9 @@ async function init() {
     }
     // 未来视界：延伸到「下下个」理论熊底，铺出完整的下一轮周期
     //（未来的减半区块与狼波周期都是可直接推算的）
-    const hNow = tipHeight ?? heightAt(dailyReal.at(-1).time + DAY);
+    // 拿不到链上高度时按锚点外推「此刻」的高度（旧写法外推到明天零点，
+    // 会比真实高度超前最多一天的块数）
+    const hNow = tipHeight ?? heightAt(Math.floor(Date.now() / 1000));
     const horizonH = waveHorizonHeight(hNow);
     const bucket = BLOCK_BUCKETS[timeframe];
     const ann = buildAnnotations(pivots, hNow, horizonH);
@@ -513,7 +539,8 @@ async function init() {
     }
     if (!meta) return;
 
-    $('stat-height').textContent = fmtInt(meta.todayPos);
+    // 链路中断或尚未拿到真实高度时加「≈」：全站约定，≈ = 推算值
+    $('stat-height').textContent = `${link.heightStale ? '≈ ' : ''}${fmtInt(meta.todayPos)}`;
     if (Number.isFinite(lastShown.height) && Math.round(meta.todayPos) !== Math.round(lastShown.height)) {
       flashValue($('stat-height').closest('.stat-value'));
     }
@@ -698,6 +725,7 @@ async function init() {
     scaleButtons.forEach((b) => { b.textContent = t(b.dataset.scale === 'log' ? 'log' : 'linear'); });
     $('ws-top').textContent = t('scaleTop');
     $('ws-bottom').textContent = t('scaleBottom');
+    updateLinkUI(); // 链路状态的悬停说明也随语言刷新
   }
   applyStaticLang();
 
@@ -781,7 +809,7 @@ async function init() {
     render(null); // 重建标注/标签轴以套用新配色（保留当前缩放）
   });
 
-  // ── 数据：快照与高度锚点立即渲染，实时尾部与链上高度后台升级 ──
+  // ── 数据：快照与高度锚点立即渲染，链上高度与实时尾部各自后台升级 ──
   let snapshot;
   try {
     [snapshot] = await Promise.all([loadSnapshot(), loadHeightAnchors()]);
@@ -794,43 +822,175 @@ async function init() {
   makeWatermark();
   $('loading').hidden = true;
 
-  const sinceTs = snapshot.at(-1).time;
-  const [liveRes, tipRes] = await Promise.allSettled([
-    (async () => {
+  // ── 链路健康与指示灯 ──
+  // 三个指示灯：价格看价格链路；区块高度与狼波指数看高度链路（指数是高度的
+  // 纯函数）。中断时指示灯熄灭、高度读数加「≈」、弹一次提示；恢复即收起
+  function updateLinkUI() {
+    const hCell = $('stat-height-cell');
+    const pCell = $('stat-price-cell');
+    const wCell = $('stat-wave-cell');
+    hCell.querySelector('.live-dot').classList.toggle('off', link.heightStale);
+    wCell.querySelector('.live-dot').classList.toggle('off', link.heightStale);
+    pCell.querySelector('.live-dot').classList.toggle('off', link.priceStale);
+    hCell.title = t(link.heightStale ? 'titleHeightStale' : 'titleHeightLive');
+    pCell.title = t(link.priceStale ? 'titlePriceStale' : 'titlePriceLive');
+  }
+  function checkLinks() {
+    const now = Date.now();
+    const hStale = now - link.heightAt > HEIGHT_STALE_MS;
+    if (hStale && link.heightTried && !link.heightNoticed) {
+      showNotice(t('noticeHeightDown'), 'height');
+      link.heightNoticed = true;
+    } else if (!hStale && link.heightNoticed) {
+      hideNotice('height');
+      link.heightNoticed = false;
+    }
+    if (hStale !== link.heightStale) {
+      link.heightStale = hStale;
+      if (meta) updateStats(); // 「≈」前缀随状态切换
+    }
+    link.priceStale = now - link.priceAt > PRICE_STALE_MS;
+    // 价格 WS 连着却 90s 没有任何消息 = 假死（半开连接）：主动断开让它重连，
+    // 期间 ticker 轮询接管（WS 自己不会报错，不这样做会一直显示旧价）
+    if (link.priceStale && wsAlive && priceSock) {
+      try { priceSock.close(); } catch { /* 已关闭 */ }
+    }
+    updateLinkUI();
+  }
+  function markHeightLive() {
+    link.heightAt = Date.now();
+    link.heightTried = true;
+    if (link.heightStale) checkLinks(); // 恢复瞬间立即点亮，不等 5s 巡检
+  }
+
+  // 新高度统一入口：HTTP 轮询与 WS 推送都走这里。更低的高度忽略——
+  // 推送与轮询偶有先后之差，真实链高只会前进
+  function applyTipHeight(tip) {
+    if (!Number.isFinite(tip)) return;
+    markHeightLive();
+    if (tipHeight !== null && tip <= tipHeight) return;
+    tipHeight = tip;
+    setTipAnchor(tip);
+    render(null); // 视图不动，引导线/读数/指数尾部原地前移
+  }
+
+  // ── 链上高度：mempool.space WebSocket 推送新块，出块即刻刷新 ──
+  // 连上后 want blocks：服务端先回最近区块列表（blocks），之后每个新块推
+  // 一条 { block }；30s 一次 ping，5s 内没有任何消息视为假死主动断开；
+  // 断线期间立刻回到 60s HTTP 轮询，并按退避重连（连不上时 2s → 128s，再加等量随机抖动）
+  const MEMPOOL_WS = 'wss://mempool.space/api/v1/ws';
+  let heightWsAlive = false;
+  let heightSock = null;
+  let heightReconnectTimer = null;
+  let heightWsFails = 0; // 连续「一条消息都没收到就断开」的次数（退避用）
+  function connectHeightStream() {
+    clearTimeout(heightReconnectTimer);
+    heightReconnectTimer = null;
+    if (heightSock && heightSock.readyState <= WebSocket.OPEN) return; // 连接中 / 已连接
+    let sock;
+    try {
+      sock = new WebSocket(MEMPOOL_WS);
+    } catch {
+      return; // 环境不支持时永久走轮询兜底
+    }
+    heightSock = sock;
+    let gotMessage = false;
+    let pingTimer = null;
+    let pongTimer = null;
+    sock.onopen = () => {
+      heightWsAlive = true;
+      sock.send(JSON.stringify({ action: 'want', data: ['blocks'] }));
+      pingTimer = setInterval(() => {
+        if (sock.readyState !== WebSocket.OPEN) return;
+        sock.send(JSON.stringify({ action: 'ping' }));
+        clearTimeout(pongTimer);
+        pongTimer = setTimeout(() => sock.close(), 5000);
+      }, 30000);
+    };
+    sock.onmessage = (ev) => {
+      clearTimeout(pongTimer);
+      let msg;
       try {
-        return await fetchBitstampLive(sinceTs);
-      } catch (e1) {
-        console.warn('Bitstamp 实时数据失败，尝试 Coinbase：', e1);
-        return fetchCoinbaseFallback(sinceTs);
+        msg = JSON.parse(ev.data);
+      } catch {
+        return; // 忽略坏消息
       }
-    })(),
-    fetchTipAnchor(),
-  ]);
-
-  if (tipRes.status === 'fulfilled') {
-    tipHeight = tipRes.value;
-  } else {
-    console.warn('链上高度获取失败，按锚点外推：', tipRes.reason);
+      gotMessage = true;
+      heightWsFails = 0;
+      markHeightLive(); // 任何消息（含 pong）都证明链路在线
+      const h = msg.block?.height
+        ?? (Array.isArray(msg.blocks) && msg.blocks.length
+          ? Math.max(...msg.blocks.map((b) => b.height))
+          : null);
+      if (h != null) applyTipHeight(Number(h));
+    };
+    sock.onclose = () => {
+      clearInterval(pingTimer);
+      clearTimeout(pongTimer);
+      heightWsAlive = false;
+      if (heightSock === sock) heightSock = null;
+      if (!gotMessage) heightWsFails = Math.min(heightWsFails + 1, 6);
+      pollHeight(); // 断线期间立刻回到 HTTP 轮询
+      const base = 2000 * 2 ** heightWsFails; // 2s, 4s … 128s
+      heightReconnectTimer = setTimeout(connectHeightStream, base + Math.random() * base);
+    };
+    sock.onerror = () => {
+      try { sock.close(); } catch { /* 已关闭 */ }
+    };
   }
 
-  if (liveRes.status === 'fulfilled' && liveRes.value.length) {
-    render(mergeCandles(snapshot, liveRes.value));
+  // HTTP 轮询兜底：WS 在线时跳过（force = 切回前台 / 网络恢复时强制补拉一次）
+  let heightPollBusy = false;
+  async function pollHeight(force = false) {
+    if ((heightWsAlive && !force) || heightPollBusy) return;
+    heightPollBusy = true;
+    try {
+      applyTipHeight(await fetchTipHeight());
+    } catch {
+      link.heightTried = true;
+      if (tipHeight === null) render(null); // 推算值随时间前移
+    } finally {
+      heightPollBusy = false;
+      checkLinks();
+    }
+  }
+  pollHeight();
+  connectHeightStream();
+  setInterval(pollHeight, 60000);
+  setInterval(checkLinks, 5000);
+
+  // ── 价格尾部：Bitstamp 分页补到今天，失败回退 Coinbase，再失败提示快照截止日 ──
+  // 不与链上高度捆绑等待：高度链路不受价格源快慢的影响
+  const sinceTs = snapshot.at(-1).time;
+  let liveTail = [];
+  try {
+    try {
+      liveTail = await fetchBitstampLive(sinceTs);
+    } catch (e1) {
+      console.warn('Bitstamp 实时数据失败，尝试 Coinbase：', e1);
+      liveTail = await fetchCoinbaseFallback(sinceTs);
+    }
+  } catch (e2) {
+    console.warn('Coinbase 备用源也失败：', e2);
+  }
+  if (liveTail.length) {
+    render(mergeCandles(snapshot, liveTail));
   } else {
-    if (liveRes.status === 'rejected') console.warn('Coinbase 备用源也失败：', liveRes.reason);
-    render(null); // 至少套用 tipHeight
-    showNotice(t('noticeStale', fmtYMD(sinceTs)));
+    showNotice(t('noticeStale', fmtYMD(sinceTs)), 'stale');
   }
 
-  // ── 实时数据流 ──
+  // ── 价格实时流 ──
   // 价格走 Bitstamp WebSocket 逐笔成交（肉眼可见的连续跳动）：
   // 顶栏读数逐笔即时更新；图表重绘节流到最多 2s 一次（每笔成交都
   // 全量重绘太重）。WS 断线 5s 后自动重连，期间 30s ticker 轮询兜底。
-  // 链上高度 60s 轮询（新区块 ≈ 每 10 分钟）：高度前移走完整 render；
   // K 线尾部 5 分钟重取一次（跨 UTC 零点时长出新的一根日线）
   let chartRenderQueued = false;
   let statsFlushTimer = null;
   function applyLivePrice(p) {
-    if (!Number.isFinite(p) || p === livePrice) return;
+    if (!Number.isFinite(p)) return;
+    link.priceAt = Date.now();
+    if (link.priceStale) checkLinks(); // 恢复瞬间立即点亮
+    if (p === livePrice) return;
     livePrice = p;
     const lastC = dailyReal.at(-1);
     if (lastC) {
@@ -855,14 +1015,17 @@ async function init() {
     }
   }
 
-  let wsAlive = false;
   function connectPriceStream() {
+    clearTimeout(priceReconnectTimer);
+    priceReconnectTimer = null;
+    if (priceSock && priceSock.readyState <= WebSocket.OPEN) return; // 连接中 / 已连接
     let sock;
     try {
       sock = new WebSocket('wss://ws.bitstamp.net');
     } catch {
       return; // 环境不支持时永久走轮询兜底
     }
+    priceSock = sock;
     sock.onopen = () => {
       wsAlive = true;
       // 逐笔成交 = 真实成交价；盘口 = 买一/卖一每秒多次变动，
@@ -873,7 +1036,9 @@ async function init() {
     sock.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.event === 'trade' && msg.data?.price) {
+        if (msg.event === 'bts:request_reconnect') {
+          sock.close(); // Bitstamp 要求客户端重连（onclose 会安排重连）
+        } else if (msg.event === 'trade' && msg.data?.price) {
           applyLivePrice(Number(msg.data.price));
         } else if (msg.event === 'data' && msg.channel === 'order_book_btcusd') {
           const bid = Number(msg.data?.bids?.[0]?.[0]);
@@ -886,30 +1051,22 @@ async function init() {
     };
     sock.onclose = () => {
       wsAlive = false;
-      setTimeout(connectPriceStream, 5000);
+      if (priceSock === sock) priceSock = null;
+      priceReconnectTimer = setTimeout(connectPriceStream, 5000);
     };
     sock.onerror = () => {
       try { sock.close(); } catch { /* 已关闭 */ }
     };
   }
 
-  async function pollPrice() {
-    if (wsAlive) return; // WS 在线时无需轮询
+  async function pollPrice(force = false) {
+    if (wsAlive && !force) return; // WS 在线时无需轮询
     try {
       const res = await fetch('https://www.bitstamp.net/api/v2/ticker/btcusd/', {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) return;
       applyLivePrice(parseFloat((await res.json()).last));
-    } catch { /* 单次失败静默，下一轮再试 */ }
-  }
-  async function pollHeight() {
-    try {
-      const tip = await fetchTipAnchor();
-      if (Number.isFinite(tip) && tip !== tipHeight) {
-        tipHeight = tip;
-        render(null);
-      }
     } catch { /* 单次失败静默，下一轮再试 */ }
   }
   let candleRefreshBusy = false;
@@ -924,10 +1081,25 @@ async function init() {
     }
   }
   setInterval(pollPrice, 30000);
-  setInterval(pollHeight, 60000);
   setInterval(pollCandles, 300000);
   pollPrice();
   connectPriceStream();
+
+  // ── 切回前台 / 网络恢复：立即补拉并重连，不等下一个轮询周期 ──
+  // 后台标签页的定时器会被节流甚至冻结（iOS Safari 还会掐断 WebSocket），
+  // 回来时先把该连的连上、该拉的拉一次，再刷新指示灯
+  function refreshNow() {
+    connectHeightStream();
+    connectPriceStream();
+    pollHeight(true);
+    pollPrice(true);
+    pollCandles();
+    checkLinks();
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshNow();
+  });
+  window.addEventListener('online', refreshNow);
   console.table(pivots.map((p) => ({ 类型: p.type === 'top' ? '牛顶' : '熊底', 日期: fmtDate(p.time), 价格: p.price, 高度: heightAt(p.time) })));
 }
 

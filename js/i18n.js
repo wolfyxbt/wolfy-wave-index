@@ -84,6 +84,12 @@ WWI(h) = 1 − (s − 157,500) / 52,500　　s ≥ 157,500（熊市段）</div>
     loadFailData: (msg) => `历史数据加载失败：${msg}`,
     loadFailInit: (msg) => `页面初始化失败：${msg}`,
     noticeStale: (d) => `实时数据加载失败，当前显示截至 ${d} 的历史数据。`,
+    // 链路状态（顶栏指示灯悬停说明 + 中断提示）
+    titleHeightLive: '链上高度 · 实时（mempool.space 推送）',
+    titleHeightStale: '链上高度连接中断，当前显示按平均出块速度推算的近似值',
+    titlePriceLive: '比特币价格 · 实时（Bitstamp）',
+    titlePriceStale: '价格连接中断，显示最近一次成交价',
+    noticeHeightDown: '链上高度连接中断，区块高度暂为推算值（≈），恢复后自动更新。',
   },
   en: {
     brand: 'Wolfy Wave Index',
@@ -169,6 +175,12 @@ WWI(h) = 1 − (s − 157,500) / 52,500   s ≥ 157,500  (bear)</div>
     loadFailData: (msg) => `Failed to load historical data: ${msg}`,
     loadFailInit: (msg) => `Initialization failed: ${msg}`,
     noticeStale: (d) => `Live data unavailable — showing history up to ${d}.`,
+    // Link status (top-bar dot tooltips + outage notice)
+    titleHeightLive: 'Chain height: live (mempool.space push)',
+    titleHeightStale: 'Chain height feed down. Showing an estimate from the average block rate.',
+    titlePriceLive: 'BTC price: live (Bitstamp)',
+    titlePriceStale: 'Price feed down. Showing the last trade.',
+    noticeHeightDown: 'Chain height feed down. Block height is an estimate (≈) until it reconnects.',
   },
 };
 
