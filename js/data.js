@@ -1,67 +1,57 @@
-// 数据管线：内置快照 + Bitstamp 实时尾部合并，Coinbase 降级备用。
+// 数据管线：行情无内置快照，全部现场拉取。Bitstamp 日线分页并行（全量历史
+// 2013 年起约 6 页，一秒内到齐），失败回退 Coinbase；尾部定时增量合并。
 import { DAY } from './config.js';
+import { timeoutSignal, mapLimit } from './util.js';
 
-const timeoutSignal = (ms) => {
-  const c = new AbortController();
-  setTimeout(() => c.abort(), ms);
-  return c.signal;
-};
-
-export async function loadSnapshot() {
-  const res = await fetch('./data/btc-daily.json', { signal: timeoutSignal(15000) });
-  if (!res.ok) throw new Error(`btc-daily.json HTTP ${res.status}`);
-  const json = await res.json();
-  return json.candles.map(([time, open, high, low, close]) => ({ time, open, high, low, close }));
+// 按时间戳去重并升序
+function dedupeSort(rows) {
+  const map = new Map();
+  for (const c of rows) map.set(c.time, c);
+  return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-// Bitstamp：从 sinceTs（快照末尾）拉到今天，分页补齐（快照很旧也能接上）
-export async function fetchBitstampLive(sinceTs) {
-  const out = [];
-  let start = sinceTs;
-  for (let page = 0; page < 12; page++) {
+// Bitstamp：从 sinceTs 拉到今天。日线逐日连续、每页最多 1000 根，各页起点可以
+// 预先算出，全部并行请求（历史越长页数越多，但总耗时≈一次往返）
+export async function fetchBitstamp(sinceTs) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const starts = [];
+  for (let s = sinceTs; s <= nowSec; s += 1000 * DAY) starts.push(s);
+  const pages = await mapLimit(starts, 6, async (start) => {
     const url = `https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=${DAY}&limit=1000&start=${start}`;
     const res = await fetch(url, { signal: timeoutSignal(10000) });
     if (!res.ok) throw new Error(`Bitstamp HTTP ${res.status}`);
     const json = await res.json();
-    const rows = json.data.ohlc.map((r) => ({
+    return json.data.ohlc.map((r) => ({
       time: Number(r.timestamp),
       open: Number(r.open),
       high: Number(r.high),
       low: Number(r.low),
       close: Number(r.close),
     }));
-    out.push(...rows);
-    if (rows.length < 1000) break;
-    start = out.at(-1).time + DAY;
-  }
-  return out;
+  });
+  return dedupeSort(pages.flat());
 }
 
-// Coinbase 备用：从 sinceTs 分窗口拉到现在
-// （每次请求最多 300 根，返回降序数组 [t, low, high, open, close, vol]）
-export async function fetchCoinbaseFallback(sinceTs) {
-  const out = [];
+// Coinbase 备用：从 sinceTs 拉到现在，每次最多 300 根，按窗口并行
+//（限 3 路：公共接口限流较严）。返回降序数组 [t, low, high, open, close, vol]
+export async function fetchCoinbase(sinceTs) {
   const nowSec = Math.floor(Date.now() / 1000);
-  let startSec = sinceTs;
-  for (let page = 0; page < 20 && startSec <= nowSec; page++) {
-    const endSec = Math.min(startSec + 299 * DAY, nowSec);
+  const windows = [];
+  for (let s = sinceTs; s <= nowSec; s += 300 * DAY) windows.push([s, Math.min(s + 299 * DAY, nowSec)]);
+  const pages = await mapLimit(windows, 3, async ([startSec, endSec]) => {
     const url = `https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=${DAY}`
       + `&start=${new Date(startSec * 1000).toISOString()}&end=${new Date(endSec * 1000).toISOString()}`;
     const res = await fetch(url, { signal: timeoutSignal(10000) });
     if (!res.ok) throw new Error(`Coinbase HTTP ${res.status}`);
     const rows = await res.json();
-    out.push(...rows.map(([t, low, high, open, close]) => ({ time: t, open, high, low, close })));
-    startSec = endSec + DAY;
-  }
-  return out.sort((a, b) => a.time - b.time);
+    return rows.map(([t, low, high, open, close]) => ({ time: t, open, high, low, close }));
+  });
+  return dedupeSort(pages.flat());
 }
 
 // 按时间戳合并，extra 覆盖 base 的重叠部分
 export function mergeCandles(base, extra) {
-  const map = new Map();
-  for (const c of base) map.set(c.time, c);
-  for (const c of extra) map.set(c.time, c);
-  return [...map.values()].sort((a, b) => a.time - b.time);
+  return dedupeSort([...base, ...extra]);
 }
 
 // 补齐内部缺口（用 whitespace 占位），保证数组严格逐日连续——
@@ -81,4 +71,3 @@ export function fillGaps(candles) {
   if (gaps > 0) console.warn(`数据存在 ${gaps} 天缺口，已用空白占位补齐`);
   return out;
 }
-

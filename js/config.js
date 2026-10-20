@@ -22,6 +22,9 @@ export const PIVOT_WINDOWS = [
   { type: 'top',    to: Infinity },                               // 进行中周期的历史最高 ≈2025-10-06
 ];
 
+// 行情历史起点（现场从交易所拉取，无内置快照）；枢轴搜索窗口也从这天开始
+export const HISTORY_START = D('2013-01-01');
+
 // K 线分桶粒度（块，约等于 日/周/月）
 export const BLOCK_BUCKETS = { day: 144, week: 1008, month: 4368 };
 

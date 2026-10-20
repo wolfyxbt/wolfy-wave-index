@@ -71,20 +71,20 @@
     </div>
     <div class="topbar-right">
       <div class="stats">
-        <div class="stat" id="stat-price-cell">
+        <div class="stat skeleton" id="stat-price-cell">
           <span class="stat-label"><span id="label-price">BTC Price</span><i class="live-dot"></i></span>
           <div class="stat-value">
             <span id="stat-price" class="price">—</span>
             <span id="stat-chg" class="chg">—</span>
           </div>
         </div>
-        <div class="stat" id="stat-height-cell">
+        <div class="stat skeleton" id="stat-height-cell">
           <span class="stat-label"><span id="label-height">Block Height</span><i class="live-dot"></i></span>
           <div class="stat-value">
             <span id="stat-height" class="price">—</span>
           </div>
         </div>
-        <div class="stat" id="stat-wave-cell" title="Wolfy Wave Index · 0 = bear bottom · 1 = bull top">
+        <div class="stat skeleton" id="stat-wave-cell" title="Wolfy Wave Index · 0 = bear bottom · 1 = bull top">
           <span class="stat-label"><span id="stat-wave-label">WWI</span><i class="live-dot"></i></span>
           <div class="stat-value">
             <span id="stat-wave" class="price">—</span>
@@ -124,6 +124,15 @@
         <svg class="icon-collapse" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         <svg class="icon-expand" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>
       </button>
+      <!-- 骨架屏：行情到齐前占住图表区（主图 : 副图 = 4 : 1），失败时在原位提示并可重试 -->
+      <div id="skeleton" class="chart-skeleton" role="status" aria-busy="true" aria-label="Loading market data…">
+        <div class="sk-pane sk-main"></div>
+        <div class="sk-pane sk-sub"></div>
+        <div class="sk-error" id="sk-error" hidden>
+          <div id="sk-error-text"></div>
+          <button id="sk-retry" class="sk-retry" type="button">Retry</button>
+        </div>
+      </div>
     </div>
 
     <aside class="wave-scale" id="wave-scale" title="Wave Index color scale">
@@ -144,11 +153,6 @@
       <button id="notice-close" aria-label="Close">×</button>
     </div>
 
-    <div id="loading" class="loading">
-      <div class="loading-brand" id="loading-brand">Wolfy Wave Index</div>
-      <div class="loading-spinner"></div>
-      <div id="loading-text">Loading market data…</div>
-    </div>
   </main>
 
   <div id="block-axis" class="block-axis">
@@ -174,10 +178,12 @@
     // 必须放在模块脚本之外：file:// 下浏览器根本不会加载 ES module，
     // 模块内的检测代码是死代码
     if (location.protocol === 'file:') {
-      document.getElementById('loading-text').textContent =
+      document.getElementById('sk-error-text').textContent =
         '不能直接双击打开本页面，请在项目目录运行 python3 -m http.server 8080 后访问 http://localhost:8080 '
         + '/ This page cannot be opened via file:// — run "python3 -m http.server 8080" in the project folder, then visit http://localhost:8080';
-      document.querySelector('.loading-spinner').style.display = 'none';
+      document.getElementById('sk-retry').hidden = true;
+      document.getElementById('sk-error').hidden = false;
+      document.getElementById('skeleton').classList.add('is-error');
     }
   </script>
   <script src="vendor/lightweight-charts.standalone.production.js"></script>

@@ -801,39 +801,100 @@ html:not([lang="en"]) .glyph-en { display: none; }
   color: var(--faint);
 }
 
-.loading {
+/* ── 骨架屏：行情到齐前占住图表区，按主图 : 副图 = 4 : 1 分割，面板上有一道
+   柔和高光缓慢扫过；顶栏三个数值为同款占位条（.stat.skeleton）。
+   失败时（.is-error）面板隐去，原位显示错误文字与重试按钮。
+   注意类名：容器是 .chart-skeleton，顶栏占位单元是 .stat.skeleton，不要混用 ── */
+.chart-skeleton {
   position: absolute;
   inset: 0;
   z-index: 30;
   display: flex;
   flex-direction: column;
+  background: var(--bg);
+}
+
+.sk-pane {
+  position: relative;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.sk-main {
+  flex: 4;
+  /* 隐约的横向网格线：暗示这里将是一张图 */
+  background-image: repeating-linear-gradient(to bottom, transparent 0 47px, var(--border) 47px 48px);
+}
+
+.sk-sub {
+  flex: 1;
+  border-top: 2px solid var(--border);
+}
+
+.sk-pane::after,
+.stat.skeleton .stat-value::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, var(--hover) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: sk-sweep 1.8s ease-in-out infinite;
+}
+
+@keyframes sk-sweep {
+  to { transform: translateX(100%); }
+}
+
+.chart-skeleton.is-error .sk-pane { display: none; }
+
+.sk-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 14px;
-  background: var(--bg);
+  padding: 0 24px;
+  text-align: center;
   font-size: 13px;
+  line-height: 1.5;
   color: var(--sub);
 }
 
-.loading-brand {
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
+.sk-retry {
+  height: var(--ctl-h);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--ctl-track);
   color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.12s ease-out;
 }
 
-.loading-spinner {
-  width: 26px;
-  height: 26px;
-  border: 2.5px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.9s linear infinite;
+.sk-retry:hover { background: var(--hover); }
+.sk-retry:active { transform: scale(0.96); }
+
+/* 顶栏数值占位条：文字透明、底色成条，数据写入时 JS 移除 .skeleton */
+.stat.skeleton .stat-value {
+  position: relative;
+  overflow: hidden;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.stat.skeleton .price,
+.stat.skeleton .chg {
+  color: transparent !important;
+  background: var(--ctl-active);
+  border-radius: var(--r-s);
 }
+
+/* 占位宽度≈真实读数宽度（$100,000.00 / +1.23%），数据写入时不跳版 */
+.stat.skeleton .price { min-width: 84px; }
+.stat.skeleton .chg { min-width: 44px; }
 
 
 
@@ -950,6 +1011,8 @@ html:not([lang="en"]) .glyph-en { display: none; }
    常驻脉动指示灯改为常亮，按压不再位移（§Reduced Motion） */
 @media (prefers-reduced-motion: reduce) {
   .live-dot { animation: none; }
+  .sk-pane::after,
+  .stat.skeleton .stat-value::after { animation: none; }
 
   .seg button:active,
   .icon-btn:active,

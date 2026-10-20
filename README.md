@@ -53,13 +53,12 @@ WWI(h) = 1 − (s − 157,500) / 52,500   s ≥ 157,500（熊市段）
 - **牛熊夹心着色**：上缘贴价格线、下缘贴副图指数线；未来推演区没有价格上缘、满高显示，实时推进的价格线会逐步「吃掉」它；减半日与牛熊市标注各有独立显隐开关；
 - **实时数据**：价格走 Bitstamp WebSocket（逐笔成交 + 盘口中间价，秒级跳动）；链上高度走 mempool.space WebSocket 推送（出块即刻刷新），断线期间 60 秒 HTTP 轮询兜底；日线尾部 5 分钟增量合并；切回前台或网络恢复时立即补拉。顶栏指示灯反映链路真实状态：链路中断即熄灭、区块高度读数加 `≈` 标明为推算值，恢复即点亮；
 - **悬停信息卡**：聚合该位置的区块高度、≈ 日期、价格、涨跌幅、指数值与周期阶段；
-- **其他**：首屏自动适配全部历史、个性化设置（主题 / 语言 / 坐标 / 类型 / 粒度 / 标注）持久化、中英文与深浅主题一键切换、内置指标说明弹窗（顶栏「?」）。
+- **其他**：加载期间显示骨架屏（图表区占位 + 顶栏占位条；区块高度与指数先于行情亮起）、首屏自动适配全部历史、个性化设置（主题 / 语言 / 坐标 / 类型 / 粒度 / 标注）持久化、中英文与深浅主题一键切换、内置指标说明弹窗（顶栏「?」）。
 
 ## 数据与精度
 
-- `data/btc-daily.json` — Bitstamp BTC/USD 日线快照（随仓库分发）；页面加载时从 Bitstamp 拉最近数据实时合并，失败回退 Coinbase，再失败显示快照并提示。刷新：`node scripts/fetch-history.mjs`（Node ≥ 18）。
-- `data/btc-heights.json` — 高度 ↔ 日期映射锚点：**每 144 块（一根日 K 的桶宽）一个真实区块头时间戳**，从创世块铺到生成当日（6,600+ 锚点），四次减半的插值日期与真实日期精确一致；页面运行时另从 mempool.space 实时补「当前高度」锚点。刷新：`node scripts/fetch-heights.mjs`（默认增量，只补抓新块；`FULL=1` 全量重抓）。
-- 两份快照由 GitHub Actions 工作流 [`.github/workflows/refresh-data.yml`](.github/workflows/refresh-data.yml) 每周一自动刷新并提交到 `main`，也可在仓库 Actions 页手动触发。
+- **行情不内置快照**：页面打开时从 Bitstamp 并行拉取 2013 年至今的全部日线（约 6 页请求，一次往返即到齐），失败回退 Coinbase，再失败在图表区原位提示并可重试；期间显示骨架屏。
+- `data/btc-heights.json` — 高度 ↔ 日期映射锚点：**每 144 块（一根日 K 的桶宽）一个真实区块头时间戳**，从创世块铺到生成当日（6,600+ 锚点），四次减半的插值日期与真实日期精确一致；这不是行情快照而是一张查找表：历史区块的时间永远不变，现场拉取要六千多次请求，所以随仓库分发。页面运行时自动补齐表末尾到链顶之间的锚点（每 144 块一个真实区块头时间戳）并缓存在浏览器，再补一个「当前高度」锚点；表长期不更新也不失真，只是首次访问多几次请求。刷新：`node scripts/fetch-heights.mjs`（默认增量，只补抓新块；`FULL=1` 全量重抓）；GitHub Actions 工作流 [`.github/workflows/refresh-data.yml`](.github/workflows/refresh-data.yml) 每周一自动增量刷新并提交，只是替访客省请求，停掉也不影响正确性。
 - 未来日期按平均出块速度外推，全站以 `≈` 标注——横轴的唯一真实坐标是区块高度。链上高度链路中断时，顶栏的区块高度读数同样以 `≈` 标注。
 
 ## 本地运行
@@ -142,13 +141,12 @@ The index climbs 0 → 1 at a constant +1/157,500 per block in the bull phase an
 - **Bull/bear sandwich shading**: top edge hugs the price line, bottom edge hugs the index line; the future has no price edge and renders full-height — the advancing live price "eats" into it; halving and bull/bear marks have independent toggles;
 - **Real-time**: Bitstamp WebSocket price (per-trade + order-book mid); chain height pushed by the mempool.space WebSocket (refreshes the moment a block is found), with 60 s HTTP polling only while the socket is down; 5 min candle merges; an immediate refetch when the tab returns to the foreground or the network comes back. The top-bar dots reflect the actual feed state: a dot goes dark when its feed is down and the block-height readout gains a `≈` to mark it as an estimate, both recovering as soon as the feed is back;
 - **Hover card** aggregating block height, ≈ date, price, change, index value and phase;
-- Full-history auto-fit on first load, persisted preferences (theme / language / scale / style / bucket / marks), Chinese & English UI, dark & light themes, built-in methodology dialog (the "?" button).
+- Skeleton screen while loading (chart placeholder + top-bar placeholder bars; block height and the index light up before the price history arrives), full-history auto-fit on first load, persisted preferences (theme / language / scale / style / bucket / marks), Chinese & English UI, dark & light themes, built-in methodology dialog (the "?" button).
 
 ## Data & Accuracy
 
-- `data/btc-daily.json` — Bitstamp BTC/USD daily snapshot (shipped with the repo); merged live at load, Coinbase fallback. Refresh: `node scripts/fetch-history.mjs` (Node ≥ 18).
-- `data/btc-heights.json` — height ↔ date anchors: **one real block-header timestamp every 144 blocks** (6,600+ anchors from genesis), interpolated halving dates match the real ones exactly; a live tip anchor is added at runtime from mempool.space. Refresh: `node scripts/fetch-heights.mjs` (incremental by default; `FULL=1` refetches everything).
-- Both snapshots are refreshed every Monday by the GitHub Actions workflow [`.github/workflows/refresh-data.yml`](.github/workflows/refresh-data.yml), which commits to `main`; it can also be run by hand from the repository's Actions tab.
+- **No price snapshot**: on load the page fetches the full BTC/USD daily history since 2013 from Bitstamp (about 6 parallel page requests, one round trip), falls back to Coinbase, and on total failure shows an in-place error with a retry button; a skeleton screen covers the chart meanwhile.
+- `data/btc-heights.json` — height ↔ date anchors: **one real block-header timestamp every 144 blocks** (6,600+ anchors from genesis), interpolated halving dates match the real ones exactly; this is a lookup table rather than a data snapshot: historical block times never change, and fetching them live would take thousands of requests, so the table ships with the repo. At runtime the page fills the gap between the table's end and the chain tip itself (one real block-header timestamp every 144 blocks, cached in the browser) and adds a live tip anchor, so a stale table never loses accuracy, it only costs a few extra requests on a first visit. Refresh: `node scripts/fetch-heights.mjs` (incremental by default; `FULL=1` refetches everything). The GitHub Actions workflow [`.github/workflows/refresh-data.yml`](.github/workflows/refresh-data.yml) refreshes it incrementally every Monday purely to spare visitors those requests; disabling it does not affect correctness.
 - Future dates are extrapolated from the average block rate and always marked `≈` — the only true coordinate is block height. While the chain-height feed is down, the top-bar block height carries the same `≈`.
 
 ## Run locally

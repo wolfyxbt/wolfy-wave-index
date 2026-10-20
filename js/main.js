@@ -1,17 +1,14 @@
-// 入口编排：内置快照立即上屏 → 后台拉实时尾部 → 原地升级；
+// 入口编排：骨架屏 → 锚点表与链上高度先到（顶栏先亮）→ 行情全量现场拉取后上屏；
 // 页面 UI（区块主轴 + 底部「高度/≈日期」双行刻度轴、分桶/主题/坐标/标注开关、
 // OHLC 读数、周期状态栏、顶部标签轴）
 import {
-  DAY, BLOCK_BUCKETS, HALVING_INTERVAL, WAVE_BULL_HALF, COLORS, FONT, FONT_MONO, setTheme,
+  DAY, HISTORY_START, BLOCK_BUCKETS, HALVING_INTERVAL, WAVE_BULL_HALF, COLORS, FONT, FONT_MONO, setTheme,
   WAVE_COLOR_STOPS, waveColor,
 } from './config.js';
 import { createChartAndSeries, applyChartTheme, setLogScale } from './chart.js';
+import { fetchBitstamp, fetchCoinbase, mergeCandles, fillGaps } from './data.js';
 import {
-  loadSnapshot, fetchBitstampLive, fetchCoinbaseFallback,
-  mergeCandles, fillGaps,
-} from './data.js';
-import {
-  loadHeightAnchors, fetchTipHeight, setTipAnchor, heightAt, timeAtHeight,
+  loadHeightAnchors, fetchTipHeight, setTipAnchor, fillAnchorGap, getAnchorStats, heightAt, timeAtHeight,
   aggregateByBlocks, extendBlocks, prependBlocks, waveIndexAt, waveHorizonHeight,
 } from './blocks.js';
 import { computePivots, buildAnnotations } from './pivots.js';
@@ -71,13 +68,32 @@ function hideNotice(key) {
 }
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
 
+// ── 骨架屏：图表区在行情到齐前显示占位；失败时在原位显示错误与重试按钮 ──
+const skeletonEl = $('skeleton');
+let skError = null; // 当前显示的错误 [文案 key, 参数]，语言切换时重绘
+function showSkeleton() {
+  skError = null;
+  skeletonEl.classList.remove('is-error');
+  $('sk-error').hidden = true;
+  skeletonEl.hidden = false;
+}
+function hideSkeleton() {
+  skeletonEl.hidden = true;
+}
+function showSkeletonError(key, msg) {
+  skError = [key, msg];
+  $('sk-error-text').textContent = t(key, msg);
+  skeletonEl.classList.add('is-error');
+  $('sk-error').hidden = false;
+  skeletonEl.hidden = false;
+}
+
 async function init() {
   // ── 主题与语言初始化（在建图之前） ──
   let themeName = localStorage.getItem(THEME_KEY) || 'dark';
   setTheme(themeName);
   document.documentElement.dataset.theme = themeName;
   setLang(localStorage.getItem(LANG_KEY) || 'en'); // 默认英文界面
-  $('loading-text').textContent = t('loading');
 
   // 右侧色标：按同一份色谱生成渐变，保证与折线逐点颜色严格一致
   $('ws-bar').style.background = `linear-gradient(to top, ${
@@ -119,6 +135,7 @@ async function init() {
   let meta = null;         // { topPos, todayPos, predictedEnd }（单位：高度）
   let idxCache = null;
   let tipHeight = null;    // 当前链上高度（mempool.space WebSocket 推送 + HTTP 轮询兜底）
+  let gapFillStarted = false; // 锚点表缺口补齐只在首次拿到链顶时触发一次
   let livePrice = null;    // 实时价格（Bitstamp WebSocket + ticker 轮询兜底）
   // 链路健康：记「最近一次证明链路在线」的时刻（ms）。高度 = HTTP 取到高度
   // 或收到任一 mempool WS 消息（含 pong）；价格 = 收到成交/盘口或 ticker 成功。
@@ -416,6 +433,7 @@ async function init() {
       dailyReal = daily.filter((c) => c.open !== undefined);
       pivots = computePivots(daily);
     }
+    if (!daily.length) return; // 行情未到：无图可画（高度/指数读数由 updateStats 单独维护）
     // 未来视界：延伸到「下下个」理论熊底，铺出完整的下一轮周期
     //（未来的减半区块与狼波周期都是可直接推算的）
     // 拿不到链上高度时按锚点外推「此刻」的高度（旧写法外推到明天零点，
@@ -476,7 +494,7 @@ async function init() {
       positionPhaseToggle();
     }
     updateStats();
-    window.wolfy = { chart, series, phaseSolid, phaseDashed, pivots, candles: daily, bars, meta }; // 调试用
+    window.wolfy = { chart, series, phaseSolid, phaseDashed, pivots, candles: daily, bars, meta, anchors: getAnchorStats() }; // 调试用
   }
 
   // ── 顶栏统计 ──
@@ -491,38 +509,40 @@ async function init() {
   function updateStats() {
     const last = dailyReal.at(-1);
     const prev = dailyReal.at(-2);
-    if (!last) return;
-
-    const priceNow = livePrice ?? last.close;
-    updateLegendPrice();
-    // 顶栏价格显示到美分：取整到美元会把逐笔成交的跳动全部抹平
-    $('stat-price').textContent = `$${priceNow.toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
-    if (Number.isFinite(lastShown.price) && priceNow !== lastShown.price) {
-      flashValue($('stat-price').closest('.stat-value'), priceNow >= lastShown.price ? 'up' : 'down');
-    }
-    lastShown.price = priceNow;
-    if (prev) {
-      const chg = (priceNow - prev.close) / prev.close;
-      const el = $('stat-chg');
-      el.textContent = fmtPct(chg);
-      el.className = `chg ${chg >= 0 ? 'up' : 'down'}`;
-    }
-    // 标签页标题即行情条（TradingView 式）：窄标签从右截断，优先级
-    // 从左到右排——实时跳动的价格最高、慢变的 WWI 次之、站名殿后。
-    // 只放两个裸数值：六万级的跳动数字自然读作 BTC 价格，0~1 的小数
-    // 自然读作 WWI，标签与涨跌幅在窄标签里只会挤掉真正的信息
-    //（随 250ms 节流刷新）
-    if (waveNow !== null) {
-      const priceTxt = priceNow.toLocaleString('en-US', {
+    const priceNow = livePrice ?? last?.close ?? null;
+    if (priceNow !== null) {
+      updateLegendPrice();
+      // 顶栏价格显示到美分：取整到美元会把逐笔成交的跳动全部抹平
+      $('stat-price').textContent = `$${priceNow.toLocaleString('en-US', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
-      });
-      document.title = `${priceTxt} · ${waveNow.toFixed(3)} · ${t('brand')}`;
+      })}`;
+      $('stat-price-cell').classList.remove('skeleton');
+      if (Number.isFinite(lastShown.price) && priceNow !== lastShown.price) {
+        flashValue($('stat-price').closest('.stat-value'), priceNow >= lastShown.price ? 'up' : 'down');
+      }
+      lastShown.price = priceNow;
+      if (prev) {
+        const chg = (priceNow - prev.close) / prev.close;
+        const el = $('stat-chg');
+        el.textContent = fmtPct(chg);
+        el.className = `chg ${chg >= 0 ? 'up' : 'down'}`;
+      }
+      // 标签页标题即行情条（TradingView 式）：窄标签从右截断，优先级
+      // 从左到右排——实时跳动的价格最高、慢变的 WWI 次之、站名殿后。
+      // 只放两个裸数值：六万级的跳动数字自然读作 BTC 价格，0~1 的小数
+      // 自然读作 WWI，标签与涨跌幅在窄标签里只会挤掉真正的信息
+      //（随 250ms 节流刷新）
+      if (waveNow !== null) {
+        const priceTxt = priceNow.toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+        document.title = `${priceTxt} · ${waveNow.toFixed(3)} · ${t('brand')}`;
+      }
     }
-    // 顶栏狼波周期指数读数（颜色 = 该值的狼波色）+ 变化闪烁
+    // 顶栏狼波周期指数读数（颜色 = 该值的狼波色）+ 变化闪烁。
+    // 指数与区块高度只依赖链上高度，不必等行情：骨架屏期间就先亮起
     const waveEl = $('stat-wave');
     const waveText = waveNow !== null ? waveNow.toFixed(3) : '—';
     waveEl.textContent = waveText;
@@ -530,21 +550,27 @@ async function init() {
     if (lastShown.wave !== null && waveNow !== null && waveText !== lastShown.wave) {
       flashValue(waveEl.closest('.stat-value'));
     }
-    if (waveNow !== null) lastShown.wave = waveText;
+    if (waveNow !== null) {
+      lastShown.wave = waveText;
+      $('stat-wave-cell').classList.remove('skeleton');
+    }
     // 色标游标跟随当前指数值
     const marker = $('ws-marker');
     if (waveNow !== null) {
       marker.hidden = false;
       marker.style.bottom = `calc(${(waveNow * 100).toFixed(2)}% - 5px)`; // 10px 圆钮取中
     }
-    if (!meta) return;
+    // 区块高度：图表就绪后以标注元数据为准，之前直接用链上高度
+    const hShown = meta ? meta.todayPos : tipHeight;
+    if (hShown === null) return;
 
     // 链路中断或尚未拿到真实高度时加「≈」：全站约定，≈ = 推算值
-    $('stat-height').textContent = `${link.heightStale ? '≈ ' : ''}${fmtInt(meta.todayPos)}`;
-    if (Number.isFinite(lastShown.height) && Math.round(meta.todayPos) !== Math.round(lastShown.height)) {
+    $('stat-height').textContent = `${link.heightStale ? '≈ ' : ''}${fmtInt(hShown)}`;
+    $('stat-height-cell').classList.remove('skeleton');
+    if (Number.isFinite(lastShown.height) && Math.round(hShown) !== Math.round(lastShown.height)) {
       flashValue($('stat-height').closest('.stat-value'));
     }
-    lastShown.height = meta.todayPos;
+    lastShown.height = hShown;
   }
 
   // ── 十字线 OHLC 读数（基于当前 bars） ──
@@ -699,7 +725,9 @@ async function init() {
     const sub = t('brandSub');
     $('brand-sub').textContent = sub;
     $('brand-sub').hidden = !sub;
-    $('loading-brand').textContent = t('brand');
+    skeletonEl.setAttribute('aria-label', t('loading'));
+    $('sk-retry').textContent = t('retry');
+    if (skError) $('sk-error-text').textContent = t(skError[0], skError[1]);
     $('label-height').textContent = t('axisName');
     $('stat-wave-label').textContent = t('statWave'); // 中文全称 / 英文缩写 WWI
     $('stat-wave-cell').title = t('titleWaveStat');
@@ -809,18 +837,15 @@ async function init() {
     render(null); // 重建标注/标签轴以套用新配色（保留当前缩放）
   });
 
-  // ── 数据：快照与高度锚点立即渲染，链上高度与实时尾部各自后台升级 ──
-  let snapshot;
+  // ── 数据：高度锚点表（本地文件）先到，链上高度链路立刻启动、顶栏先亮；
+  //   行情无内置快照、全部现场拉取，到齐后一次性上屏并撤掉骨架屏 ──
   try {
-    [snapshot] = await Promise.all([loadSnapshot(), loadHeightAnchors()]);
+    await loadHeightAnchors();
   } catch (e) {
     console.error(e);
-    $('loading-text').textContent = t('loadFailData', e.message);
-    return;
+    showSkeletonError('loadFailData', e.message);
+    return; // 没有锚点表就没有横轴，什么都画不了
   }
-  render(snapshot, { fit: true });
-  makeWatermark();
-  $('loading').hidden = true;
 
   // ── 链路健康与指示灯 ──
   // 三个指示灯：价格看价格链路；区块高度与狼波指数看高度链路（指数是高度的
@@ -847,7 +872,7 @@ async function init() {
     }
     if (hStale !== link.heightStale) {
       link.heightStale = hStale;
-      if (meta) updateStats(); // 「≈」前缀随状态切换
+      if (meta || tipHeight !== null) updateStats(); // 「≈」前缀随状态切换
     }
     link.priceStale = now - link.priceAt > PRICE_STALE_MS;
     // 价格 WS 连着却 90s 没有任何消息 = 假死（半开连接）：主动断开让它重连，
@@ -871,7 +896,21 @@ async function init() {
     if (tipHeight !== null && tip <= tipHeight) return;
     tipHeight = tip;
     setTipAnchor(tip);
-    render(null); // 视图不动，引导线/读数/指数尾部原地前移
+    if (daily.length) {
+      render(null); // 视图不动，引导线/读数/指数尾部原地前移
+    } else {
+      // 行情还没到：先把高度与指数读数亮起来（骨架屏期间顶栏即有真实数据）
+      waveNow = waveIndexAt(tip);
+      updateStats();
+    }
+    if (!gapFillStarted) {
+      // 首次拿到链顶：后台补齐锚点表末尾到链顶之间的真实出块时间
+      gapFillStarted = true;
+      fillAnchorGap(tip, (n) => {
+        console.info(`高度锚点补齐 ${n} 个（已缓存到浏览器）`);
+        if (daily.length) render(null); // 最近几天的 K 线按真实边界重新分桶
+      });
+    }
   }
 
   // ── 链上高度：mempool.space WebSocket 推送新块，出块即刻刷新 ──
@@ -959,25 +998,36 @@ async function init() {
   setInterval(pollHeight, 60000);
   setInterval(checkLinks, 5000);
 
-  // ── 价格尾部：Bitstamp 分页补到今天，失败回退 Coinbase，再失败提示快照截止日 ──
-  // 不与链上高度捆绑等待：高度链路不受价格源快慢的影响
-  const sinceTs = snapshot.at(-1).time;
-  let liveTail = [];
-  try {
+  // ── 行情历史：无内置快照，全部现场拉取。Bitstamp 分页并行，失败回退 Coinbase；
+  //   到齐后一次性上屏并撤掉骨架屏；失败在骨架屏原位提示并可重试 ──
+  let historyLoading = false;
+  let priceFeedsStarted = false;
+  async function loadHistory() {
+    if (historyLoading) return;
+    historyLoading = true;
+    showSkeleton();
     try {
-      liveTail = await fetchBitstampLive(sinceTs);
-    } catch (e1) {
-      console.warn('Bitstamp 实时数据失败，尝试 Coinbase：', e1);
-      liveTail = await fetchCoinbaseFallback(sinceTs);
+      let candles;
+      try {
+        candles = await fetchBitstamp(HISTORY_START);
+      } catch (e1) {
+        console.warn('Bitstamp 历史数据失败，尝试 Coinbase：', e1);
+        candles = await fetchCoinbase(HISTORY_START);
+      }
+      if (!candles.length) throw new Error('empty response');
+      render(candles, { fit: true });
+      makeWatermark();
+      hideSkeleton();
+    } catch (e) {
+      console.warn('行情历史数据加载失败：', e);
+      showSkeletonError('loadFailData', e.message);
+      return;
+    } finally {
+      historyLoading = false;
     }
-  } catch (e2) {
-    console.warn('Coinbase 备用源也失败：', e2);
+    if (!priceFeedsStarted) startPriceFeeds(); // 逐笔价要写进今天那根 K 线：有历史后才启动
   }
-  if (liveTail.length) {
-    render(mergeCandles(snapshot, liveTail));
-  } else {
-    showNotice(t('noticeStale', fmtYMD(sinceTs)), 'stale');
-  }
+  $('sk-retry').addEventListener('click', loadHistory);
 
   // ── 价格实时流 ──
   // 价格走 Bitstamp WebSocket 逐笔成交（肉眼可见的连续跳动）：
@@ -1074,26 +1124,35 @@ async function init() {
     if (candleRefreshBusy || !dailyReal.length) return;
     candleRefreshBusy = true;
     try {
-      const tail = await fetchBitstampLive(dailyReal.at(-1).time - DAY);
+      const tail = await fetchBitstamp(dailyReal.at(-1).time - DAY);
       if (tail.length) render(mergeCandles(daily, tail));
     } catch { /* 单次失败静默，下一轮再试 */ } finally {
       candleRefreshBusy = false;
     }
   }
-  setInterval(pollPrice, 30000);
-  setInterval(pollCandles, 300000);
-  pollPrice();
-  connectPriceStream();
+  function startPriceFeeds() {
+    priceFeedsStarted = true;
+    setInterval(pollPrice, 30000);
+    setInterval(pollCandles, 300000);
+    pollPrice();
+    connectPriceStream();
+  }
+
+  await loadHistory();
 
   // ── 切回前台 / 网络恢复：立即补拉并重连，不等下一个轮询周期 ──
   // 后台标签页的定时器会被节流甚至冻结（iOS Safari 还会掐断 WebSocket），
   // 回来时先把该连的连上、该拉的拉一次，再刷新指示灯
   function refreshNow() {
     connectHeightStream();
-    connectPriceStream();
     pollHeight(true);
-    pollPrice(true);
-    pollCandles();
+    if (priceFeedsStarted) {
+      connectPriceStream();
+      pollPrice(true);
+      pollCandles();
+    } else if (skError && !historyLoading) {
+      loadHistory(); // 之前加载失败：回来时自动重试
+    }
     checkLinks();
   }
   document.addEventListener('visibilitychange', () => {
@@ -1105,5 +1164,5 @@ async function init() {
 
 init().catch((e) => {
   console.error(e);
-  $('loading-text').textContent = t('loadFailInit', e.message);
+  showSkeletonError('loadFailInit', e.message);
 });
