@@ -1,6 +1,6 @@
 # 狼波周期指数 · Wolfy Wave Index
 
-**[English version below ↓](#wolfy-wave-index-1)**
+**[English version below ↓](#wolfy-wave-index)**
 
 以**区块高度**为唯一横轴的比特币四年周期图表。主图为 2011 年至今的完整 BTC/USD 行情（狼波着色 / K 线 / 折线三种展示），副图为「狼波周期指数」——一个纯区块制的周期位置指标；牛熊区间着色、减半日竖线与未来推演直接画在图上，价格与链上高度实时更新。
 
