@@ -533,6 +533,25 @@ html:not([lang="en"]) .glyph-en { display: none; }
   pointer-events: none;
 }
 
+/* 往期同位回声在轴上的日期牌：与十字线浮标同形，虚线边 + 弱化文字，
+   表示「不是光标本体，而是之前周期的同一位置」 */
+.bx-echo {
+  font-family: var(--font-mono);
+  border-radius: var(--r-s);
+  position: absolute;
+  top: 7px;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  font-size: 11px;
+  color: var(--sub);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  z-index: 1;
+  pointer-events: none;
+}
+
 /* ── 图表区 ── */
 .chart-wrap {
   position: relative;
@@ -728,6 +747,16 @@ html:not([lang="en"]) .glyph-en { display: none; }
 
 .tt-row:first-of-type {
   margin-top: 0;
+}
+
+/* 卡片内的分节小标题（往期同位列表） */
+.tt-sub {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .tt-chip {

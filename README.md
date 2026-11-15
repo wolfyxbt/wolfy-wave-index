@@ -53,6 +53,7 @@ WWI(h) = 1 − (s − 157,500) / 52,500   s ≥ 157,500（熊市段）
 - **牛熊夹心着色**：上缘贴价格线、下缘贴副图指数线；未来推演区没有价格上缘、满高显示，实时推进的价格线会逐步「吃掉」它；减半日与牛熊市标注各有独立显隐开关；
 - **实时数据**：价格走 Bitstamp WebSocket（逐笔成交 + 盘口中间价，秒级跳动）；链上高度走 mempool.space WebSocket 推送（出块即刻刷新），断线期间 60 秒 HTTP 轮询兜底；日线尾部 5 分钟增量合并；切回前台或网络恢复时立即补拉。顶栏指示灯反映链路真实状态：链路中断即熄灭、区块高度读数加 `≈` 标明为推算值，恢复即点亮；
 - **悬停信息卡**：聚合该位置的区块高度、≈ 日期、价格、涨跌幅、指数值与周期阶段；
+- **往期同位提示**：悬停时，之前每一轮周期的同一位置（高度 − n × 210,000）同步亮起——贯穿两个面板的竖直点线、价格线与指数线上的圆环、该处价格标签、底轴上的「高度 ≈ 日期」牌；悬停信息卡同时列出各轮的日期与价格。悬停在未来推演区同样有效；
 - **其他**：加载期间显示骨架屏（图表区占位 + 顶栏占位条；区块高度与指数先于行情亮起）、首屏自动适配全部历史、个性化设置（主题 / 语言 / 坐标 / 类型 / 粒度 / 标注）持久化、中英文与深浅主题一键切换、内置指标说明弹窗（顶栏「?」）。
 
 ## 数据与精度
@@ -141,6 +142,7 @@ The index climbs 0 → 1 at a constant +1/157,500 per block in the bull phase an
 - **Bull/bear sandwich shading**: top edge hugs the price line, bottom edge hugs the index line; the future has no price edge and renders full-height — the advancing live price "eats" into it; halving and bull/bear marks have independent toggles;
 - **Real-time**: Bitstamp WebSocket price (per-trade + order-book mid); chain height pushed by the mempool.space WebSocket (refreshes the moment a block is found), with 60 s HTTP polling only while the socket is down; 5 min candle merges; an immediate refetch when the tab returns to the foreground or the network comes back. The top-bar dots reflect the actual feed state: a dot goes dark when its feed is down and the block-height readout gains a `≈` to mark it as an estimate, both recovering as soon as the feed is back;
 - **Hover card** aggregating block height, ≈ date, price, change, index value and phase;
+- **Prior-cycle echoes**: while hovering, the same point in every earlier cycle (height − n × 210,000) lights up — a dotted vertical line across both panes, rings on the price and index lines, a price tag, and a "height ≈ date" badge on the bottom axis; the hover card also lists each cycle's date and price. Works over the projected future too;
 - Skeleton screen while loading (chart placeholder + top-bar placeholder bars; block height and the index light up before the price history arrives), full-history auto-fit on first load, persisted preferences (theme / language / scale / style / bucket / marks), Chinese & English UI, dark & light themes, built-in methodology dialog (the "?" button).
 
 ## Data & Accuracy
