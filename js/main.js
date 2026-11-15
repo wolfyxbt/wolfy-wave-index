@@ -14,6 +14,7 @@ import {
 import { computePivots, buildAnnotations } from './pivots.js';
 import { t, setLang, I18N } from './i18n.js';
 import { setSeriesData, timeToLogical, logicalToX } from './primitives/base.js';
+import { CycleEcho } from './primitives/cycle-echo.js';
 
 const $ = (id) => document.getElementById(id);
 const fmtDate = (t) => new Date(t * 1000).toISOString().slice(0, 10);
@@ -106,14 +107,22 @@ async function init() {
   // 最近一次构建的标注，按类别分组（减半日与牛熊市独立显隐）
   let built = { bands: [], halvings: [] };
   let builtPhase = { bands: [], halvings: [] };
+  // 往期同位回声（十字线悬停时，之前各轮周期同一位置的视觉提示）：
+  // 主图/副图各一个常驻 primitive，不受标注开关控制，随标注一起挂载/迁移
+  const echoMain = new CycleEcho({ mode: 'price' });
+  const echoPhase = new CycleEcho({ mode: 'wave' });
+  let echoTime = null;     // 十字线所在 K 线桶的起始高度（未悬停为 null）
+  let echoMarks = [];      // 当前回声标记（近 → 远），悬停卡与底轴牌共用
   // 当前开关状态下应挂载的集合；减半线在前 = 先挂 = 画在最底层
   const currentMainPrims = () => [
     ...(halvingOn ? built.halvings : []),
     ...(bandsOn ? built.bands : []),
+    echoMain,
   ];
   const currentPhasePrims = () => [
     ...(halvingOn ? builtPhase.halvings : []),
     ...(bandsOn ? builtPhase.bands : []),
+    echoPhase,
   ];
   // 默认初始状态：标注开启、对数坐标、狼波着色、144 区块（日）；
   // 用户改过则从 localStorage 恢复（存的值非法时回落默认）
@@ -286,6 +295,94 @@ async function init() {
     // 贴近左右边缘时钳制在可视范围内，不被拦腰裁掉
     const cw = bxCursor.offsetWidth;
     bxCursor.style.left = `${paneLeft() + Math.max(cw / 2, Math.min(width - cw / 2, x))}px`;
+  }
+
+  // ── 往期同位回声 ──
+  // 悬停高度 h 的「同位」= h − n × 210,000（n = 1, 2, …，直到区块 0）：
+  // 周期严格按减半网格重复，同位处的狼波指数与牛熊阶段完全相同。
+  // 与十字线一样吸附到 K 线桶（周期长度不是桶宽的整数倍，取最近的桶），
+  // 价格读该桶收盘价；早于行情起点的周期没有价格，只画竖线与指数圆环
+  function computeEchoMarks(h) {
+    const marks = [];
+    if (h === null || bars.length < 2) return marks;
+    for (let k = 1; h - k * HALVING_INTERVAL >= 0; k++) {
+      const i = Math.round(timeToLogical(h - k * HALVING_INTERVAL));
+      // 出块偏快时个别桶会被跳过（whitespace 占位）：落在占位桶上就取
+      // 紧邻的真实 K 线，两侧都没有才算无行情
+      const b = [i, i - 1, i + 1].map((j) => bars[j]).find((x) => x?.open !== undefined) ?? bars[i];
+      if (!b) break;
+      const wave = waveIndexAt(b.time);
+      const price = b.open !== undefined ? b.close : null;
+      marks.push({
+        k,
+        time: b.time,
+        price,
+        wave,
+        color: waveColor(wave),
+        label: price !== null ? fmtPrice(price) : null,
+      });
+    }
+    return marks;
+  }
+
+  // 底轴上的回声日期牌（与十字线浮标同位置语义，弱化样式）。相邻回声恒隔
+  // 一个周期：放得下就用「高度 ≈ 日期」完整格式，缩小到放不下时只标日期，
+  // 再挤就整组不显示（悬停卡里仍有完整列表）；被当前区块牌压住的那枚不显示。
+  // 须在 updateAxisCursor 之后调用：避让判断要读十字线浮标的实际宽度
+  const echoPills = [];
+  function updateAxisEchoes() {
+    while (echoPills.length < echoMarks.length) {
+      const el = document.createElement('div');
+      el.className = 'bx-echo';
+      blockAxis.insertBefore(el, bxNow); // 叠放次序在当前区块牌与十字线浮标之下
+      echoPills.push(el);
+    }
+    echoPills.forEach((el) => { el.hidden = true; });
+    if (!echoMarks.length) return;
+    const width = paneWidth();
+    const pl = paneLeft();
+    const cx = logicalToX(chart, timeToLogical(echoTime));
+    const xs = echoMarks.map((m) => logicalToX(chart, timeToLogical(m.time)));
+    if (cx === null || xs[0] === null) return;
+    const gap = cx - xs[0]; // 一个周期的屏幕宽度
+    const formats = [
+      (m) => `${fmtInt(m.time)} ≈ ${fmtYMD(timeAtHeight(m.time))}`,
+      (m) => `≈ ${fmtYMD(timeAtHeight(m.time))}`,
+    ];
+    const probe = echoPills[0];
+    const cursorW = bxCursor.offsetWidth; // 最近一枚还要避开十字线浮标
+    const fmt = formats.find((f) => {
+      probe.textContent = f(echoMarks[0]);
+      probe.hidden = false;
+      const w = probe.offsetWidth;
+      probe.hidden = true;
+      return Math.max(w, (w + cursorW) / 2) + 8 <= gap;
+    });
+    if (!fmt) return;
+    const nowX = bxNow.hidden ? null : logicalToX(chart, timeToLogical(meta?.todayPos));
+    const nowW = bxNow.offsetWidth;
+    echoMarks.forEach((m, i) => {
+      const x = xs[i];
+      if (x === null || x < 0 || x > width) return;
+      const el = echoPills[i];
+      el.textContent = fmt(m);
+      el.hidden = false;
+      const w = el.offsetWidth;
+      if (nowX !== null && Math.abs(x - nowX) < (w + nowW) / 2 + 4) {
+        el.hidden = true;
+        return;
+      }
+      // 贴近左右边缘时钳制在可视范围内，不被拦腰裁掉
+      el.style.left = `${pl + Math.max(w / 2, Math.min(width - w / 2, x))}px`;
+    });
+  }
+
+  // 按当前悬停位置刷新回声（十字线移动、以及 bars 重建后都要重算）
+  function applyEcho() {
+    echoMarks = computeEchoMarks(echoTime);
+    echoMain.setMarks(echoMarks);
+    echoPhase.setMarks(echoMarks);
+    updateAxisEchoes();
   }
 
   chart.timeScale().subscribeVisibleLogicalRangeChange(renderBlockAxis);
@@ -482,6 +579,7 @@ async function init() {
     attachedPhase = phaseOn ? currentPhasePrims() : [];
     for (const p of attachedPhase) phaseSolid.attachPrimitive(p);
     idxCache = null;
+    applyEcho(); // bars 已重建：悬停中的回声按新的分桶重新吸附
     if (fit) {
       // 等一帧，确保 autoSize 已应用真实容器尺寸
       requestAnimationFrame(() => {
@@ -649,6 +747,18 @@ async function init() {
       t('ttPhase'),
       isBull ? t('bull') : t('bear'),
     );
+    // 往期同位：之前各轮周期在同一周期位置的日期与价格（近 → 远）
+    const priced = echoMarks.filter((m) => m.price !== null);
+    if (priced.length) {
+      rows += `<div class="tt-sub">${t('ttEcho')}</div>`;
+      for (const m of priced) {
+        rows += row(
+          waveTextColor(m.wave),
+          t('ttEchoRow', m.k, fmtYMD(timeAtHeight(m.time))),
+          fmtPrice(m.price),
+        );
+      }
+    }
     tooltip.innerHTML =
       `<div class="tt-head"><b>${t('ttBlock', fmtInt(h))}</b> ≈ ${fmtYMD(timeAtHeight(h))}</div>${rows}`;
     tooltip.hidden = false;
@@ -663,6 +773,11 @@ async function init() {
       const b = bars[idxCache.get(param.time)];
       if (b && b.open !== undefined) hovered = b;
     }
+    // 底轴浮标：十字线位置的高度与≈日期
+    updateAxisCursor(param?.time !== undefined ? param.time : null);
+    // 往期同位回声先于悬停卡刷新：卡片要列出同一组标记
+    echoTime = param?.time !== undefined ? param.time : null;
+    applyEcho();
     updateTooltip(param, hovered);
     updateLegendPrice(hovered ? hovered.close : null);
     // 狼波指数读数跟随十字线（未来虚线段也有值），移开时回落到当前值
@@ -670,8 +785,6 @@ async function init() {
       ? (param.seriesData.get(phaseSolid) ?? param.seriesData.get(phaseDashed))
       : null;
     updateWaveTitle(w ? w.value : waveNow);
-    // 底轴浮标：十字线位置的高度与≈日期
-    updateAxisCursor(param?.time !== undefined ? param.time : null);
   });
 
   // 默认视图完整呈现全部价格历史：横向 [首根真实K线, 今日] 两侧各留
